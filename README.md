@@ -1,47 +1,51 @@
-import pandas as pd
-import urllib.request
-import json
-from pytz import timezone
-import datetime
+import boto3
+from botocore.config import Config
 
-def time_converter(time):
-    d = datetime.datetime.fromtimestamp(int(time),tz=timezone('US/Pacific'))
-    converted_time = d.strftime('%H:%M:%S')
-    return converted_time
+awsAccessKeyId = dbutils.secrets.get("scopeName", key = "AWSAccessKeyID")
+awsSecretAccessKey = dbutils.secrets.get("scopeName", key = "AWSSecretAccessKey")
 
-def datetime_converter(time):
-    d = datetime.datetime.fromtimestamp(int(time),tz=timezone('US/Pacific'))
-    converted_time = d.strftime('%d-%m-%Y %H:%M:%S')
-    return converted_time
+botoConfig = Config(
+        region_name = 'eu-west-2',
+        signature_version = 'v4',
+        retries = {
+            'max_attempts': 10,
+            'mode': 'standard'
+        }
+    )
 
-def file_name(time):
-    d = datetime.datetime.fromtimestamp(int(time),tz=timezone('US/Pacific'))
-    converted_time = d.strftime('%Y%m%d')
-    return converted_time
 
-url = 'http://api.openweathermap.org/data/2.5/weather?zip=95132,us&mode=json&units=metric&APPID=1332d1509ad061c8381ddfd835341138'
+client = boto3.client('sts', config = botoConfig, aws_access_key_id = awsAccessKeyId, aws_secret_access_key = awsSecretAccessKey)
+response = client.assume_role(
+        RoleArn='arn:aws:iam::1234567890:role/role_name',
+        RoleSessionName='AzureDatabricks',
+        DurationSeconds=3600
+    )
 
-url = urllib.request.urlopen(url)
-output = url.read().decode('utf-8')
-raw_api_dict = json.loads(output)
-url.close()
-# df = pd.DataFrame()
+credResponse = response['Credentials']
 
-print(dict(
-        zip_code=95132,
-        city=raw_api_dict.get('name'),
-        country=raw_api_dict.get('sys').get('country'),
-        temp=raw_api_dict.get('main').get('temp'),
-        temp_max=raw_api_dict.get('main').get('temp_max'),
-        temp_min=raw_api_dict.get('main').get('temp_min'),
-        humidity=raw_api_dict.get('main').get('humidity'),
-        pressure=raw_api_dict.get('main').get('pressure'),
-        sky=raw_api_dict['weather'][0]['main'],
-        sunrise=time_converter(raw_api_dict.get('sys').get('sunrise')),
-        sunset=time_converter(raw_api_dict.get('sys').get('sunset')),
-        wind=raw_api_dict.get('wind').get('speed'),
-        wind_deg=raw_api_dict.get('deg'),
-        dt=datetime_converter(raw_api_dict.get('dt')),
-        cloudiness=raw_api_dict.get('clouds').get('all'),
-        day=file_name(raw_api_dict.get('dt'))
-    ))
+
+
+spark.conf.set("fs.s3a.credentialsType", "AssumeRole")
+spark.conf.set("fs.s3a.stsAssumeRole.arn", "arn:aws:iam::1234567890:role/role_name")
+spark.conf.set("fs.s3a.acl.default", "BucketOwnerFullControl")
+
+sc._jsc.hadoopConfiguration().set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider")
+sc._jsc.hadoopConfiguration().set("fs.s3a.access.key", credResponse['AccessKeyId'] )
+sc._jsc.hadoopConfiguration().set("fs.s3a.secret.key", credResponse['SecretAccessKey'])
+sc._jsc.hadoopConfiguration().set("fs.s3a.session.token", credResponse['SessionToken'])
+
+
+
+df = (spark.readStream.format("cloudFiles")
+      .option("cloudFiles.format", "json")
+      .schema(definedSchema)
+      .load("s3a://bucket/directory/")
+     )
+
+
+
+(df.writeStream.format("delta") 
+  .option("checkpointLocation", "/mnt/lake/directory/_checkpoint") 
+  .trigger(once=True)
+  .start("/mnt/lake/directory/")
+)
